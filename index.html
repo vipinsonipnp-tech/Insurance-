@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="theme-color" content="#12151C" />
+<title>Money Manager</title>
+<link rel="manifest" href="./manifest.json" />
+<link rel="icon" href="./icon-192.png" />
+<link rel="apple-touch-icon" href="./icon-192.png" />
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #12151C; color: #EDEFF3;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .serif { font-family: Georgia, "Times New Roman", serif; }
+  .num { font-variant-numeric: tabular-nums; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-thumb { background: #2B3242; border-radius: 4px; }
+  input, select, button { font-family: inherit; }
+  input:focus, select:focus { outline: none; border-color: #C99A3E !important; }
+  .row-hover:active { background: #1E2430; }
+  button { cursor: pointer; }
+  a { color: inherit; }
+  .card { background: #1A1F29; border: 1px solid #232A38; border-radius: 12px; padding: 16px; }
+  .field-label { font-size: 11px; color: #8A93A6; margin-bottom: 4px; }
+  .text-input, .money-input, select.text-input {
+    width: 100%; background: #12151C; border: 1px solid #2B3242; border-radius: 8px;
+    padding: 9px 10px; color: #EDEFF3; font-size: 13.5px;
+  }
+  .money-wrap { position: relative; }
+  .money-wrap span { position: absolute; left: 10px; top: 9px; color: #697084; font-size: 13.5px; }
+  .money-input { padding-left: 24px; }
+  .btn { border: none; border-radius: 8px; font-weight: 700; font-size: 13px; padding: 9px 16px; }
+  .empty { text-align: center; padding: 40px 20px; color: #697084; font-size: 13.5px; border: 1px dashed #2B3242; border-radius: 12px; }
+  @keyframes slideUp { from { opacity: 0; transform: translateY(6px);} to { opacity: 1; transform: translateY(0);} }
+  @keyframes toastIn { from { opacity: 0; transform: translate(-50%, 8px);} to { opacity: 1; transform: translate(-50%, 0);} }
+  .anim { animation: slideUp .2s ease; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<div id="root">Loading…</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var STORAGE_KEY = "money-manager-v2";
+  var CATEGORIES = ["Food", "Travel", "Bills", "Rent", "Shopping", "Health", "Entertainment", "Other"];
+  var ACCOUNT_COLORS = ["#4F9D6E", "#6B7FD7", "#C25B4A", "#4FA0C9", "#B879C9", "#9DB84F"];
+  var CASH_COLOR = "#C99A3E";
+  var EMPTY = { cash: 0, accounts: [], receivables: [], payables: [], loans: [], expenses: [] };
+
+  function uid() { return Math.random().toString(36).slice(2, 10); }
+  function today() { return new Date().toISOString().slice(0, 10); }
+  function inr(n) { return "\u20B9" + Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 }); }
+  function fmtDate(d) {
+    var dt = new Date(d);
+    if (isNaN(dt)) return d;
+    return dt.toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
+  }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function val(id) { var e = document.getElementById(id); return e ? e.value : ""; }
+
+  // ---------- state ----------
+  var db = loadData();
+  var tab = "overview";
+  var toastMsg = "";
+  var toastTimer = null;
+  var ui = {}; // ephemeral per-tab ui state, reset on tab switch
+
+  function loadData() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) { var parsed = JSON.parse(raw); return Object.assign({}, EMPTY, parsed); }
+    } catch (e) {}
+    return JSON.parse(JSON.stringify(EMPTY));
+  }
+  function persist() {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); } catch (e) {}
+  }
+  function flash(msg) {
+    toastMsg = msg;
+    clearTimeout(toastTimer);
+    renderToastOnly();
+    toastTimer = setTimeout(function () { toastMsg = ""; renderToastOnly(); }, 1800);
+  }
+  function resetUi() { ui = { panelOpen: false, editCash: false, editingAccountId: null }; }
+  resetUi();
+
+  // ---------- derived ----------
+  function totals() {
+    var totalReceivable = db.receivables.reduce(function (s, r) { return s + Number(r.amount); }, 0);
+    var totalPayable = db.payables.reduce(function (s, p) { return s + Number(p.amount); }, 0);
+    var totalLoan = db.loans.reduce(function (s, l) { return s + Number(l.remaining); }, 0);
+    var totalAccounts = db.accounts.reduce(function (s, a) { return s + Number(a.balance); }, 0);
+    var totalCash = Number(db.cash) || 0;
+    var netWorth = totalCash + totalAccounts + totalReceivable - totalPayable - totalLoan;
+    var totalExpense = db.expenses.reduce(function (s, e) { return s + Number(e.amount); }, 0);
+    return { totalReceivable: totalReceivable, totalPayable: totalPayable, totalLoan: totalLoan,
+      totalAccounts: totalAccounts, totalCash: totalCash, netWorth: netWorth, totalExpense: totalExpense };
+  }
+  function accountColor(id) {
+    var idx = db.accounts.findIndex(function (a) { return a.id === id; });
+    return ACCOUNT_COLORS[idx % ACCOUNT_COLORS.length] || "#8A93A6";
+  }
+  function sourceLabel(source) {
+    if (!source || source.type === "cash") return "Cash";
+    var acc = db.accounts.find(function (a) { return a.id === source.accountId; });
+    return acc ? acc.name : "Deleted account";
+  }
+  function sourceColor(source) {
+    if (!source || source.type === "cash") return CASH_COLOR;
+    return accountColor(source.accountId);
+  }
+  function applyExpenseToBalances(source, amount, sign) {
+    if (!source || source.type === "cash") { db.cash = Number(db.cash) + sign * amount; return; }
+    var acc = db.accounts.find(function (a) { return a.id === source.accountId; });
+    if (acc) acc.balance = Number(acc.balance) + sign * amount;
+  }
+
+  // ---------- header / tabbar ----------
+  function headerHtml() {
+    var t = totals();
+    var positive = t.netWorth >= 0;
+    return '' +
+      '<div style="border-bottom:1px solid #232A38;padding:28px 16px 22px;background:linear-gradient(180deg,#171B24 0%,#12151C 100%)">' +
+        '<div style="max-width:720px;margin:0 auto;position:relative;padding-left:14px">' +
+          '<div style="position:absolute;left:0;top:2px;bottom:2px;width:2px;background:#8B2E2E;border-radius:2px"></div>' +
+          '<div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:#8A93A6;margin-bottom:6px">Your khata</div>' +
+          '<div class="serif num" style="font-size:38px;font-weight:700;line-height:1;color:' + (positive ? "#EDEFF3" : "#D98072") + '">' + inr(t.netWorth) + '</div>' +
+          '<div style="font-size:12.5px;color:#8A93A6;margin-top:6px">Net worth &middot; cash + accounts + receivables &minus; payables &minus; loans</div>' +
+        '</div>' +
+      '</div>';
+  }
+
+  function tabBarHtml() {
+    var tabs = [
+      { id: "overview", label: "Overview" },
+      { id: "accounts", label: "Accounts", count: db.accounts.length },
+      { id: "receive", label: "Receive", count: db.receivables.length },
+      { id: "pay", label: "Pay", count: db.payables.length },
+      { id: "loans", label: "Loans", count: db.loans.length },
+      { id: "expenses", label: "Expenses", count: db.expenses.length }
+    ];
+    var buttons = tabs.map(function (t) {
+      var active = tab === t.id;
+      return '<button data-action="tab" data-tab="' + t.id + '" style="background:none;border:none;padding:13px 14px;font-size:13.5px;font-weight:600;white-space:nowrap;color:' +
+        (active ? "#EDEFF3" : "#697084") + ';border-bottom:2px solid ' + (active ? "#C99A3E" : "transparent") + ';margin-bottom:-1px;display:flex;align-items:center;gap:6px">' +
+        t.label + (t.count ? ' <span style="font-size:10.5px;background:#232A38;color:#8A93A6;border-radius:20px;padding:1px 6px">' + t.count + '</span>' : '') +
+        '</button>';
+    }).join("");
+    return '<div style="border-bottom:1px solid #232A38;position:sticky;top:0;background:#12151C;z-index:10">' +
+      '<div style="max-width:720px;margin:0 auto;display:flex;overflow-x:auto;padding:0 16px">' + buttons + '</div></div>';
+  }
+
+  function statTile(label, value, color, symbol) {
+    return '<div class="card" style="padding:14px 16px">' +
+      '<div style="display:flex;align-items:center;gap:6px;color:#8A93A6;font-size:11.5px;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">' +
+        '<span style="color:' + color + '">' + symbol + '</span> ' + label +
+      '</div>' +
+      '<div class="num" style="font-size:20px;font-weight:700;color:' + color + '">' + inr(value) + '</div>' +
+    '</div>';
+  }
+
+  // ---------- overview ----------
+  function renderOverview() {
+    var t = totals();
+    var byCategory = {};
+    db.expenses.forEach(function (e) { byCategory[e.category] = (byCategory[e.category] || 0) + Number(e.amount); });
+    var catList = Object.keys(byCategory).map(function (k) { return [k, byCategory[k]]; }).sort(function (a, b) { return b[1] - a[1]; });
+    var maxCat = catList.length ? catList[0][1] : 1;
+
+    var bySource = {};
+    db.expenses.forEach(function (e) { var key = sourceLabel(e.source); bySource[key] = (bySource[key] || 0) + Number(e.amount); });
+    var sourceList = Object.keys(bySource).map(function (k) { return [k, bySource[k]]; }).sort(function (a, b) { return b[1] - a[1]; });
+
+    var html = '<div class="anim">';
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">' +
+      statTile("To receive", t.totalReceivable, "#4F9D6E", "&darr;") +
+      statTile("To pay", t.totalPayable, "#C25B4A", "&uarr;") +
+      statTile("Loan outstanding", t.totalLoan, "#6B7FD7", "&#8962;") +
+      statTile("Total spent", t.totalExpense, "#C99A3E", "\u20B9") +
+      '</div>';
+
+    html += '<div class="card" style="margin-bottom:10px">' +
+      '<div style="font-size:13px;color:#8A93A6;margin-bottom:12px">Where your money sits</div>' +
+      '<div style="display:flex;flex-direction:column;gap:10px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center">' +
+        '<div style="display:flex;align-items:center;gap:8px"><span style="width:8px;height:8px;border-radius:4px;background:' + CASH_COLOR + '"></span><span style="font-size:13.5px">Cash</span></div>' +
+        '<span class="num" style="font-weight:700;font-size:14px">' + inr(t.totalCash) + '</span>' +
+      '</div>';
+    db.accounts.forEach(function (a) {
+      html += '<div style="display:flex;justify-content:space-between;align-items:center">' +
+        '<div style="display:flex;align-items:center;gap:8px"><span style="width:8px;height:8px;border-radius:4px;background:' + accountColor(a.id) + '"></span><span style="font-size:13.5px">' + esc(a.name) + '</span></div>' +
+        '<span class="num" style="font-weight:700;font-size:14px;color:' + (a.balance < 0 ? "#D98072" : "#EDEFF3") + '">' + inr(a.balance) + '</span>' +
+      '</div>';
+    });
+    if (db.accounts.length === 0) html += '<div style="font-size:12.5px;color:#697084">No bank accounts added yet &mdash; see the Accounts tab.</div>';
+    html += '</div>' +
+      '<div style="border-top:1px solid #232A38;margin-top:12px;padding-top:10px;display:flex;justify-content:space-between">' +
+        '<span style="font-size:12.5px;color:#8A93A6">Total liquid</span><span class="num" style="font-weight:700">' + inr(t.totalCash + t.totalAccounts) + '</span>' +
+      '</div></div>';
+
+    if (catList.length > 0) {
+      html += '<div class="card" style="margin-bottom:10px"><div style="font-size:13px;color:#8A93A6;margin-bottom:12px">Spending by category</div>';
+      catList.forEach(function (pair) {
+        var pct = (pair[1] / maxCat) * 100;
+        html += '<div style="margin-bottom:10px">' +
+          '<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>' + esc(pair[0]) + '</span><span class="num" style="font-weight:600">' + inr(pair[1]) + '</span></div>' +
+          '<div style="height:5px;background:#232A38;border-radius:3px"><div style="height:5px;width:' + pct + '%;background:#C99A3E;border-radius:3px"></div></div>' +
+        '</div>';
+      });
+      html += '</div>';
+    }
+
+    if (sourceList.length > 0) {
+      html += '<div class="card"><div style="font-size:13px;color:#8A93A6;margin-bottom:12px">Spending by payment source</div>' +
+        '<div style="display:flex;height:10px;border-radius:5px;overflow:hidden;margin-bottom:10px">';
+      sourceList.forEach(function (pair) {
+        var label = pair[0], amt = pair[1];
+        var col = label === "Cash" ? CASH_COLOR : (function () {
+          var acc = db.accounts.find(function (a) { return a.name === label; });
+          return acc ? accountColor(acc.id) : "#8A93A6";
+        })();
+        html += '<div style="width:' + ((amt / t.totalExpense) * 100) + '%;background:' + col + '"></div>';
+      });
+      html += '</div><div style="display:flex;gap:16px;flex-wrap:wrap">';
+      sourceList.forEach(function (pair) {
+        var label = pair[0], amt = pair[1];
+        var col = label === "Cash" ? CASH_COLOR : (function () {
+          var acc = db.accounts.find(function (a) { return a.name === label; });
+          return acc ? accountColor(acc.id) : "#8A93A6";
+        })();
+        html += '<div style="font-size:12.5px;display:flex;align-items:center;gap:6px;color:#8A93A6"><span style="width:8px;height:8px;border-radius:4px;background:' + col + '"></span>' +
+          esc(label) + ': <span class="num" style="color:#EDEFF3;font-weight:600">' + inr(amt) + '</span></div>';
+      });
+      html += '</div></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // ---------- accounts ----------
+  function renderAccounts() {
+    var html = '<div class="anim">';
+    html += '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:14px">' +
+      '<div class="serif" style="font-size:20px;font-weight:700">Accounts</div>' +
+      '<button class="btn" data-action="toggle-panel" style="background:' + (ui.panelOpen ? "#232A38" : "#4FA0C9") + ';color:' + (ui.panelOpen ? "#EDEFF3" : "#12151C") + '">' + (ui.panelOpen ? "Cancel" : "+ Add account") + '</button>' +
+    '</div>';
+
+    if (ui.panelOpen) {
+      html += '<div class="card" style="margin-bottom:14px">' +
+        '<div style="display:flex;gap:10px;margin-bottom:12px">' +
+          '<div style="flex:1"><div class="field-label">Account name</div><input class="text-input" id="f-name" placeholder="e.g. SBI Savings"></div>' +
+          '<div style="flex:1"><div class="field-label">Opening balance</div><div class="money-wrap"><span>\u20B9</span><input type="number" class="text-input money-input" id="f-opening" placeholder="0"></div></div>' +
+        '</div>' +
+        '<button class="btn" data-action="add-account" style="background:#4FA0C9;color:#12151C;width:100%">Save account</button>' +
+      '</div>';
+    }
+
+    html += '<div class="card" style="margin-bottom:10px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center">' +
+        '<div style="font-size:14px;font-weight:600">\uD83D\uDCB5 Cash</div>';
+    if (!ui.editCash) {
+      html += '<div style="display:flex;align-items:center;gap:10px">' +
+        '<span class="num" style="font-weight:700;color:' + CASH_COLOR + ';font-size:15px">' + inr(db.cash) + '</span>' +
+        '<button data-action="edit-cash" style="background:none;border:none;color:#697084;font-size:12px">Edit</button>' +
+      '</div>';
+    } else {
+      html += '<div style="display:flex;align-items:center;gap:6px">' +
+        '<div class="money-wrap" style="width:110px"><span>\u20B9</span><input type="number" class="text-input money-input" id="f-cash" value="' + esc(db.cash) + '"></div>' +
+        '<button data-action="save-cash" style="background:' + CASH_COLOR + ';border:none;border-radius:7px;padding:8px 9px;color:#12151C;font-weight:700">&check;</button>' +
+      '</div>';
+    }
+    html += '</div></div>';
+
+    if (db.accounts.length === 0) {
+      html += '<div class="empty">No bank accounts yet. Add one above to start splitting expenses by account.</div>';
+    } else {
+      html += '<div style="display:flex;flex-direction:column;gap:10px">';
+      db.accounts.forEach(function (a) {
+        html += '<div class="card"><div style="display:flex;justify-content:space-between;align-items:center">' +
+          '<div style="display:flex;align-items:center;gap:10px"><span style="width:10px;height:10px;border-radius:5px;background:' + accountColor(a.id) + '"></span><span style="font-size:14px;font-weight:600">' + esc(a.name) + '</span></div>';
+        if (ui.editingAccountId !== a.id) {
+          html += '<div style="display:flex;align-items:center;gap:10px">' +
+            '<span class="num" style="font-weight:700;font-size:15px;color:' + (a.balance < 0 ? "#D98072" : accountColor(a.id)) + '">' + inr(a.balance) + '</span>' +
+            '<button data-action="edit-account" data-id="' + a.id + '" style="background:none;border:none;color:#697084;font-size:12px">Edit</button>' +
+            '<button data-action="delete-account" data-id="' + a.id + '" style="background:none;border:none;color:#697084;font-size:12px">&#10005;</button>' +
+          '</div>';
+        } else {
+          html += '<div style="display:flex;align-items:center;gap:6px">' +
+            '<div class="money-wrap" style="width:110px"><span>\u20B9</span><input type="number" class="text-input money-input" id="f-acc-' + a.id + '" value="' + esc(a.balance) + '"></div>' +
+            '<button data-action="save-account" data-id="' + a.id + '" style="background:' + accountColor(a.id) + ';border:none;border-radius:7px;padding:8px 9px;color:#12151C;font-weight:700">&check;</button>' +
+          '</div>';
+        }
+        html += '</div></div>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // ---------- receive / pay ----------
+  function renderLedger(kind) {
+    var title = kind === "receive" ? "Money to receive" : "Money to pay";
+    var accent = kind === "receive" ? "#4F9D6E" : "#C25B4A";
+    var symbol = kind === "receive" ? "&darr;" : "&uarr;";
+    var items = kind === "receive" ? db.receivables : db.payables;
+    var emptyText = kind === "receive" ? "No one owes you anything right now." : "You don't owe anyone right now.";
+    var total = items.reduce(function (s, i) { return s + Number(i.amount); }, 0);
+
+    var html = '<div class="anim">';
+    html += '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:14px">' +
+      '<div><div class="serif" style="font-size:20px;font-weight:700">' + title + '</div>' +
+      '<div class="num" style="font-size:13px;color:' + accent + ';font-weight:600;margin-top:2px">' + inr(total) + ' total</div></div>' +
+      '<button class="btn" data-action="toggle-panel" style="background:' + (ui.panelOpen ? "#232A38" : accent) + ';color:' + (ui.panelOpen ? "#EDEFF3" : "#12151C") + '">' + (ui.panelOpen ? "Cancel" : "+ Add") + '</button>' +
+    '</div>';
+
+    if (ui.panelOpen) {
+      html += '<div class="card" style="margin-bottom:14px">' +
+        '<div style="display:flex;gap:10px;margin-bottom:10px">' +
+          '<div style="flex:1"><div class="field-label">Name</div><input class="text-input" id="f-name" placeholder="e.g. Rahul"></div>' +
+          '<div style="flex:1"><div class="field-label">Amount</div><div class="money-wrap"><span>\u20B9</span><input type="number" class="text-input money-input" id="f-amount" placeholder="0"></div></div>' +
+        '</div>' +
+        '<div class="field-label">Note (optional)</div><input class="text-input" id="f-note" placeholder="e.g. lunch split">' +
+        '<button class="btn" data-action="add-ledger" data-kind="' + kind + '" style="margin-top:12px;background:' + accent + ';color:#12151C;width:100%">Save entry</button>' +
+      '</div>';
+    }
+
+    if (items.length === 0) {
+      html += '<div class="empty">' + emptyText + '</div>';
+    } else {
+      html += '<div class="card" style="padding:0;overflow:hidden">';
+      items.forEach(function (it, idx) {
+        html += '<div class="row-hover" style="display:flex;align-items:center;justify-content:space-between;padding:13px 16px;' + (idx < items.length - 1 ? "border-bottom:1px solid #232A38" : "") + '">' +
+          '<div style="display:flex;align-items:center;gap:10px"><span style="color:' + accent + '">' + symbol + '</span>' +
+          '<div><div style="font-size:14px;font-weight:600">' + esc(it.name) + '</div>' +
+          '<div style="font-size:11.5px;color:#697084">' + fmtDate(it.date) + (it.note ? " &middot; " + esc(it.note) : "") + '</div></div></div>' +
+          '<div style="display:flex;align-items:center;gap:10px"><span class="num" style="font-weight:700;color:' + accent + ';font-size:14.5px">' + inr(it.amount) + '</span>' +
+          '<button data-action="delete-ledger" data-kind="' + kind + '" data-id="' + it.id + '" style="background:none;border:none;color:#697084;font-size:13px">&#10005;</button></div>' +
+        '</div>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // ---------- loans ----------
+  function renderLoans() {
+    var total = db.loans.reduce(function (s, l) { return s + Number(l.remaining); }, 0);
+    var html = '<div class="anim">';
+    html += '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:14px">' +
+      '<div><div class="serif" style="font-size:20px;font-weight:700">Loans</div>' +
+      '<div class="num" style="font-size:13px;color:#6B7FD7;font-weight:600;margin-top:2px">' + inr(total) + ' outstanding</div></div>' +
+      '<button class="btn" data-action="toggle-panel" style="background:' + (ui.panelOpen ? "#232A38" : "#6B7FD7") + ';color:' + (ui.panelOpen ? "#EDEFF3" : "#12151C") + '">' + (ui.panelOpen ? "Cancel" : "+ Add loan") + '</button>' +
+    '</div>';
+
+    if (ui.panelOpen) {
+      html += '<div class="card" style="margin-bottom:14px">' +
+        '<div style="display:flex;gap:10px;margin-bottom:10px">' +
+          '<div style="flex:1"><div class="field-label">Lender / loan name</div><input class="text-input" id="f-name" placeholder="e.g. HDFC personal loan"></div>' +
+          '<div style="flex:1"><div class="field-label">Principal amount</div><div class="money-wrap"><span>\u20B9</span><input type="number" class="text-input money-input" id="f-principal" placeholder="0"></div></div>' +
+        '</div>' +
+        '<div class="field-label">Note (optional)</div><input class="text-input" id="f-note" placeholder="e.g. 12% interest, EMI ₹4,500">' +
+        '<button class="btn" data-action="add-loan" style="margin-top:12px;background:#6B7FD7;color:#12151C;width:100%">Save loan</button>' +
+      '</div>';
+    }
+
+    if (db.loans.length === 0) {
+      html += '<div class="empty">No loans on record. Nothing owed to lenders.</div>';
+    } else {
+      html += '<div style="display:flex;flex-direction:column;gap:10px">';
+      db.loans.forEach(function (l) {
+        var paidPct = l.principal > 0 ? Math.max(0, Math.min(100, ((l.principal - l.remaining) / l.principal) * 100)) : 0;
+        html += '<div class="card">' +
+          '<div style="display:flex;justify-content:space-between;margin-bottom:8px">' +
+            '<div><div style="font-size:14px;font-weight:600">' + esc(l.name) + '</div>' + (l.note ? '<div style="font-size:11.5px;color:#697084;margin-top:2px">' + esc(l.note) + '</div>' : '') + '</div>' +
+            '<button data-action="delete-loan" data-id="' + l.id + '" style="background:none;border:none;color:#697084;font-size:13px">&#10005;</button>' +
+          '</div>' +
+          '<div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:6px">' +
+            '<span class="num" style="color:#6B7FD7;font-weight:700">' + inr(l.remaining) + ' left</span><span style="color:#697084">of ' + inr(l.principal) + '</span>' +
+          '</div>' +
+          '<div style="height:5px;background:#232A38;border-radius:3px;margin-bottom:10px"><div style="height:5px;width:' + paidPct + '%;background:#6B7FD7;border-radius:3px"></div></div>' +
+          '<div style="display:flex;gap:8px">' +
+            '<button data-action="pay-loan-1000" data-id="' + l.id + '" style="flex:1;background:#12151C;border:1px solid #2B3242;border-radius:7px;color:#EDEFF3;font-size:12px;padding:7px 0;font-weight:600">&minus; ₹1,000 paid</button>' +
+            '<input type="number" placeholder="Custom ₹" id="f-loanpay-' + l.id + '" style="width:0;flex:1;background:#12151C;border:1px solid #2B3242;border-radius:7px;color:#EDEFF3;font-size:12px;padding:7px 8px">' +
+            '<button data-action="pay-loan-custom" data-id="' + l.id + '" style="background:#6B7FD7;border:none;border-radius:7px;color:#12151C;font-weight:700;font-size:12px;padding:7px 10px">Pay</button>' +
+          '</div>' +
+        '</div>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // ---------- expenses ----------
+  function renderExpenses() {
+    var total = db.expenses.reduce(function (s, e) { return s + Number(e.amount); }, 0);
+    var html = '<div class="anim">';
+    html += '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:14px">' +
+      '<div><div class="serif" style="font-size:20px;font-weight:700">Expenses</div>' +
+      '<div class="num" style="font-size:13px;color:#C99A3E;font-weight:600;margin-top:2px">' + inr(total) + ' spent</div></div>' +
+      '<button class="btn" data-action="toggle-panel" style="background:' + (ui.panelOpen ? "#232A38" : "#C99A3E") + ';color:' + (ui.panelOpen ? "#EDEFF3" : "#12151C") + '">' + (ui.panelOpen ? "Cancel" : "+ Add") + '</button>' +
+    '</div>';
+
+    if (ui.panelOpen) {
+      html += '<div class="card" style="margin-bottom:14px">' +
+        '<div style="display:flex;gap:10px;margin-bottom:10px">' +
+          '<div style="flex:1"><div class="field-label">Category</div><select class="text-input" id="f-category">' +
+            CATEGORIES.map(function (c) { return '<option value="' + c + '">' + c + '</option>'; }).join("") +
+            '<option value="__custom">Custom&hellip;</option></select></div>' +
+          '<div style="flex:1"><div class="field-label">Amount</div><div class="money-wrap"><span>\u20B9</span><input type="number" class="text-input money-input" id="f-amount" placeholder="0"></div></div>' +
+        '</div>' +
+        '<div style="margin-bottom:10px"><div class="field-label">Custom category (used if "Custom" selected above)</div><input class="text-input" id="f-customcat" placeholder="e.g. Groceries"></div>' +
+        '<div style="margin-bottom:10px"><div class="field-label" style="margin-bottom:5px">Paid from</div>' +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap">';
+
+      var srcOptions = [{ id: "cash", label: "Cash", color: CASH_COLOR }].concat(
+        db.accounts.map(function (a) { return { id: a.id, label: a.name, color: accountColor(a.id) }; })
+      );
+      srcOptions.forEach(function (opt, i) {
+        var radioId = "src-" + opt.id;
+        html += '<input type="radio" name="expense-source" id="' + radioId + '" value="' + opt.id + '" style="display:none" ' + (i === 0 ? "checked" : "") + ' data-color="' + opt.color + '">' +
+          '<label for="' + radioId + '" class="src-label" data-color="' + opt.color + '" style="padding:8px 12px;border-radius:8px;font-size:12.5px;font-weight:700;border:1px solid #2B3242;background:#12151C;color:#8A93A6;display:inline-block">' + esc(opt.label) + '</label>';
+      });
+      html += '</div>';
+      if (db.accounts.length === 0) html += '<div style="font-size:11.5px;color:#697084;margin-top:6px">Add bank accounts in the Accounts tab to pay from them.</div>';
+      html += '</div>' +
+        '<div class="field-label">Note (optional)</div><input class="text-input" id="f-note" placeholder="e.g. groceries at DMart">' +
+        '<button class="btn" data-action="add-expense" style="margin-top:12px;background:#C99A3E;color:#12151C;width:100%">Save expense</button>' +
+      '</div>';
+    }
+
+    if (db.expenses.length === 0) {
+      html += '<div class="empty">No expenses logged yet.</div>';
+    } else {
+      html += '<div class="card" style="padding:0;overflow:hidden">';
+      db.expenses.forEach(function (e, idx) {
+        html += '<div class="row-hover" style="display:flex;align-items:center;justify-content:space-between;padding:13px 16px;' + (idx < db.expenses.length - 1 ? "border-bottom:1px solid #232A38" : "") + '">' +
+          '<div><div style="font-size:14px;font-weight:600">' + esc(e.category) + '</div>' +
+          '<div style="font-size:11.5px;color:#697084;display:flex;align-items:center;gap:6px;margin-top:2px">' +
+          '<span style="color:' + sourceColor(e.source) + ';background:' + sourceColor(e.source) + '1a;padding:1px 6px;border-radius:4px;font-weight:700;font-size:10.5px">' + esc(sourceLabel(e.source)) + '</span>' +
+          fmtDate(e.date) + (e.note ? " &middot; " + esc(e.note) : "") + '</div></div>' +
+          '<div style="display:flex;align-items:center;gap:10px"><span class="num" style="font-weight:700;color:#C99A3E;font-size:14.5px">' + inr(e.amount) + '</span>' +
+          '<button data-action="delete-expense" data-id="' + e.id + '" style="background:none;border:none;color:#697084;font-size:13px">&#10005;</button></div>' +
+        '</div>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // ---------- main render ----------
+  function contentHtml() {
+    if (tab === "overview") return renderOverview();
+    if (tab === "accounts") return renderAccounts();
+    if (tab === "receive") return renderLedger("receive");
+    if (tab === "pay") return renderLedger("pay");
+    if (tab === "loans") return renderLoans();
+    if (tab === "expenses") return renderExpenses();
+    return "";
+  }
+
+  function toastHtml() {
+    if (!toastMsg) return "";
+    return '<div id="toast" style="position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1A1F29;border:1px solid #2B3242;color:#EDEFF3;padding:10px 18px;border-radius:8px;font-size:13.5px;animation:toastIn .2s ease;box-shadow:0 8px 24px rgba(0,0,0,.4);z-index:50">' + esc(toastMsg) + '</div>';
+  }
+
+  function render() {
+    var root = document.getElementById("root");
+    root.innerHTML = headerHtml() + tabBarHtml() +
+      '<main style="max-width:720px;margin:0 auto;padding:20px 16px 80px">' + contentHtml() + '</main>' +
+      toastHtml();
+    styleRadioLabels();
+    bindEvents();
+  }
+  function renderToastOnly() {
+    var existing = document.getElementById("toast");
+    if (existing) existing.remove();
+    if (toastMsg) {
+      document.body.insertAdjacentHTML("beforeend", toastHtml());
+    }
+  }
+
+  function styleRadioLabels() {
+    var radios = document.querySelectorAll('input[name="expense-source"]');
+    radios.forEach(function (r) {
+      var label = document.querySelector('label[for="' + r.id + '"]');
+      if (!label) return;
+      var color = r.dataset.color;
+      function applyStyle() {
+        if (r.checked) {
+          label.style.border = "1px solid " + color;
+          label.style.background = color + "22";
+          label.style.color = color;
+        } else {
+          label.style.border = "1px solid #2B3242";
+          label.style.background = "#12151C";
+          label.style.color = "#8A93A6";
+        }
+      }
+      applyStyle();
+      r.addEventListener("change", function () {
+        radios.forEach(function (other) {
+          var l2 = document.querySelector('label[for="' + other.id + '"]');
+          if (!l2) return;
+          if (other.checked) { l2.style.border = "1px solid " + other.dataset.color; l2.style.background = other.dataset.color + "22"; l2.style.color = other.dataset.color; }
+          else { l2.style.border = "1px solid #2B3242"; l2.style.background = "#12151C"; l2.style.color = "#8A93A6"; }
+        });
+      });
+    });
+  }
+
+  // ---------- actions ----------
+  var actions = {
+    "tab": function (ds) { tab = ds.tab; resetUi(); render(); },
+    "toggle-panel": function () { ui.panelOpen = !ui.panelOpen; render(); },
+
+    "add-account": function () {
+      var name = val("f-name").trim();
+      if (!name) return;
+      db.accounts.push({ id: uid(), name: name, balance: Number(val("f-opening")) || 0 });
+      persist(); ui.panelOpen = false; render(); flash("Account added");
+    },
+    "delete-account": function (ds) {
+      db.accounts = db.accounts.filter(function (a) { return a.id !== ds.id; });
+      persist(); render(); flash("Account removed");
+    },
+    "edit-cash": function () { ui.editCash = true; render(); },
+    "save-cash": function () {
+      db.cash = Number(val("f-cash")) || 0;
+      persist(); ui.editCash = false; render(); flash("Cash balance updated");
+    },
+    "edit-account": function (ds) { ui.editingAccountId = ds.id; render(); },
+    "save-account": function (ds) {
+      var acc = db.accounts.find(function (a) { return a.id === ds.id; });
+      if (acc) acc.balance = Number(val("f-acc-" + ds.id)) || 0;
+      persist(); ui.editingAccountId = null; render(); flash("Balance updated");
+    },
+
+    "add-ledger": function (ds) {
+      var name = val("f-name").trim();
+      var amount = Number(val("f-amount"));
+      if (!name || !amount) return;
+      var item = { id: uid(), name: name, amount: amount, note: val("f-note").trim(), date: today() };
+      if (ds.kind === "receive") db.receivables.unshift(item); else db.payables.unshift(item);
+      persist(); ui.panelOpen = false; render(); flash("Added to " + (ds.kind === "receive" ? "receivables" : "payables"));
+    },
+    "delete-ledger": function (ds) {
+      if (ds.kind === "receive") db.receivables = db.receivables.filter(function (x) { return x.id !== ds.id; });
+      else db.payables = db.payables.filter(function (x) { return x.id !== ds.id; });
+      persist(); render(); flash(ds.kind === "receive" ? "Marked received" : "Marked paid");
+    },
+
+    "add-loan": function () {
+      var name = val("f-name").trim();
+      var principal = Number(val("f-principal"));
+      if (!name || !principal) return;
+      db.loans.unshift({ id: uid(), name: name, principal: principal, remaining: principal, note: val("f-note").trim(), date: today() });
+      persist(); ui.panelOpen = false; render(); flash("Loan added");
+    },
+    "delete-loan": function (ds) {
+      db.loans = db.loans.filter(function (l) { return l.id !== ds.id; });
+      persist(); render(); flash("Loan removed");
+    },
+    "pay-loan-1000": function (ds) {
+      var l = db.loans.find(function (x) { return x.id === ds.id; });
+      if (l) l.remaining = Math.max(0, l.remaining - 1000);
+      persist(); render(); flash("Payment recorded");
+    },
+    "pay-loan-custom": function (ds) {
+      var v = Number(val("f-loanpay-" + ds.id));
+      if (!v) return;
+      var l = db.loans.find(function (x) { return x.id === ds.id; });
+      if (l) l.remaining = Math.max(0, l.remaining - v);
+      persist(); render(); flash("Payment recorded");
+    },
+
+    "add-expense": function () {
+      var selectEl = document.getElementById("f-category");
+      var category = selectEl.value === "__custom" ? val("f-customcat").trim() : selectEl.value;
+      var amount = Number(val("f-amount"));
+      if (!category || !amount) return;
+      var checked = document.querySelector('input[name="expense-source"]:checked');
+      var source = (!checked || checked.value === "cash") ? { type: "cash" } : { type: "account", accountId: checked.value };
+      applyExpenseToBalances(source, amount, -1);
+      db.expenses.unshift({ id: uid(), category: category, amount: amount, source: source, note: val("f-note").trim(), date: today() });
+      persist(); ui.panelOpen = false; render(); flash("Expense logged & deducted");
+    },
+    "delete-expense": function (ds) {
+      var exp = db.expenses.find(function (e) { return e.id === ds.id; });
+      if (exp) { applyExpenseToBalances(exp.source, exp.amount, +1); db.expenses = db.expenses.filter(function (e) { return e.id !== ds.id; }); }
+      persist(); render(); flash("Expense removed & refunded");
+    }
+  };
+
+  function bindEvents() {
+    document.querySelectorAll("[data-action]").forEach(function (elm) {
+      elm.addEventListener("click", function () {
+        var action = elm.dataset.action;
+        if (actions[action]) actions[action](elm.dataset);
+      });
+    });
+  }
+
+  render();
+
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("./sw.js").catch(function () {});
+    });
+  }
+})();
+</script>
+</body>
+</html>
